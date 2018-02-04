@@ -1,13 +1,16 @@
 (ns re-state.core
   (:require [clojure.set :refer [rename-keys]]
             [re-frame.core :as rf]
-            [re-state.util :as util]))
+            [re-state.flow :as fl]))
 
 (defn get-intent [context]
   (get-in context [:coeffects :event 0]))
 
 (defn get-state [context]
   (get-in context [:coeffects ::state]))
+
+(defn get-flow [context]
+  (get-in context [:coeffects ::flow]))
 
 (def effects-keys-alias
   {:db :next-db ::state :next-state})
@@ -20,24 +23,64 @@
   (merge (rename-keys (:effects   context) effects-keys-alias)
          (rename-keys (:coeffects context) coeffects-keys-alias)))
 
+(defmulti accept?
+  "Checks if the transition predicate keyword provided as the first argument
+  should be accepted in the context passed in the second argument."
+  (fn [k _] k))
+
+(defmulti effects
+  "Returns the effects for the transition effects keyword provided as the first
+  argument in the context passed in the second argument. Noop if k is nil."
+  (fn [k _] k))
+
+(defmethod effects nil [_ _] nil)
+
+(defmulti resolve-effects-conflict
+  "Returns a vector of [effect-name effect-value] for the duplicate effects key
+  found when collecting all effects."
+  (fn [k _ _] k))
+
+(defmethod resolve-effects-conflict :dispatch [_ x y]
+  [:dispatch-n [x y]])
+
+(defmethod resolve-effects-conflict :dispatch-n [_ x y]
+  [:dispatch-n (into x y)])
+
+(defn merge-effects-with [f m [k v]]
+  (if (contains? m k)
+    (recur f (dissoc m k) (f k (get m k) v))
+    (assoc m k v)))
+
+(defn with-context [f x context]
+  (cond
+    (fn? x)
+    (x context)
+
+    (vector? x)
+    (f (first x) (assoc context :params (rest x)))
+
+    :else
+    (f x context)))
+
 (defn make-accept? [context]
-  (let [rs-context (context->rs-context context)
-        tpm (get-in context [:coeffects ::flow :tpm])]
+  (let [rs-context (context->rs-context context)]
     (fn [intent state]
-      (util/accept? (util/get-tpred tpm intent state) rs-context))))
+      (every? #(with-context accept? % rs-context)
+              (fl/get-transition-predicates (get-flow context) intent state)))))
 
 (defn get-effects [context]
   (let [rs-context (context->rs-context context)
-        tem (get-in context [:coeffects ::flow :tem])
         intent (get-intent context)
         next-state (get-in context [:effects ::state])]
-    ((util/get-effects-fn tem intent next-state) rs-context)))
+    (->> (fl/get-next-effects (get-flow context) intent next-state)
+         (map #(with-context effects % rs-context))
+         (apply concat)
+         (reduce (partial merge-effects-with resolve-effects-conflict) {}))))
 
 (defn get-next-states [context]
-  (get-in context [:coeffects
-                   ::flow :fsm
-                   (get-state context)
-                   (get-intent context)]))
+  (fl/get-next-states (get-flow context)
+                      (get-state context)
+                      (get-intent context)))
 
 (defn transition [context]
   {:post [(some? (get-in % [:effects ::state]))]}
@@ -109,11 +152,22 @@
                  :event [:route :entry]
                  ::state :ready
                  ::flow {:fsm {:ready {:route #{:entry}}}
-                            :tpm {:entry {:route (constantly true)}}
-                            :tem {:entry {:route (constantly {:dispatch [:load-entries]})}}}}})
+                            :tpm {:entry {:route #{:always-true}}}
+                            :tem {:entry {:route #{:load-entries :route-home [:route :out]}}}}}})
+
+
+  (defmethod effects :route-home [_ _]
+    {:dispatch [:route :home]})
+
+  (defmethod accept? :always-true [_ _] true)
+
+  (defmethod effects :load-entries [_ _]
+    {:dispatch [:load-entries]})
+
+  (defmethod effects :route [_ {:keys [params]}]
+    {:dispatch-n [[:route (first params)]]})
 
   (-> context
       (transition)
       (next-effects)
       (assoc-db-state)))
-
