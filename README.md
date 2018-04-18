@@ -6,47 +6,58 @@ Pattern](http://sam.js.org/) and
 
 ## Overview
 
-The main concept of the library is the "flow". This is a map made with the
-following keys:
+The main concept of the library is the "flow". This is a map of control state
+keys to control state maps, where a control state map has the following keys:
 
-- `:fsm`: The finite state machine map.
-- `:tpm`: The transition predicate map.
-- `:tem`: The transition effects map.
+- `:intents`: A map of intent to proposed next states
+- `:preds`: A map of predicate keywords
+- `:effects`: A map of effects predicate keywords
 
 Below you'll find a description of each.
 
-### `:fsm`
+### `:intents`
 
 ```clojure
-{nil          {:init       #{:empty}}
- :empty       {:add-water  #{:in-between}}
- :in-between  {:add-water  #{:in-between :full}
-               :drink      #{:in-between :empty}}
-  :full       {:drink      #{:in-between}}}
+{nil         {:intents  {:init #{:empty}}}
+
+ :empty      {:intents  {:add-water #{:in-between}}
+              :preds    #{:empty?}}
+
+ :in-between {:intents  {:add-water #{:in-between :full}
+                         :drink #{:in-between :empty}}
+              :preds    #{:not-filled? :not-empty?}}
+
+ :full       {:intents  {:drink #{:in-between}}
+              :preds    #{:filled?}}}
 ```
 
-The finite state machine is a map of current state to a map of intent to
-possible next states.
+The intents map an event intent to possible next states.
 
-### `:tpm`
+### `:preds`
 
 ```clojure
-{:in-between  {:add-water  #{:not-filled?}
-               :drink      #{:not-empty?}}
- :full        {:add-water  #{:filled?}}
- :empty       {:drink      #{:empty?}
-               :init       #{:always-true}}}
+{nil         {:intents  {:init #{:empty}}}
+
+ :empty      {:intents  {:add-water #{:in-between}}
+              :preds    #{:empty?}}
+
+ :in-between {:intents  {:add-water #{:in-between :full}
+                         :drink #{:in-between :empty}}
+              :preds    #{:not-filled? :not-empty?}}
+
+ :full       {:intents  {:drink #{:in-between}}
+              :preds    #{:filled?}}}
 ```
 
-The transition predicate map is a map of next state to a map of intent to
-transition predicate.
+`:preds` are a set of transition predicate keywords. These keywords are
+registered using the multimethod `accept?`. Each must be true for the proposed
+state to be accepted.
 
-For example if in the above `:fsm` we were to be in the `:in-between` state with
+For example if in the above flow we were to be in the `:in-between` state with
 the intent of `:add-water` we'd have the two possible next states of
 `:in-between` and `:full`. To determine which is the next valid state we pass a
-context to the predicate functions mapped to the keywords at the paths
-`[:in-between :add-water]` and `[:full :add-water]` in the `:tpm`. This context
-looks like the following:
+context to the predicate functions registered for the predicates keywords of
+`:in-between` and `:full`. This context looks like the following:
 
 ```clojure
 {:prev-db    {:v 1}        ;; the previous db
@@ -55,7 +66,7 @@ looks like the following:
  :prev-state :in-between}  ;; the previous state
 ```
 
-To implement the transitions `:filled?` and `:not-filled?` we `defmethod`
+To implement the predicates `:filled?` and `:not-filled?` we `defmethod`
 `re-state.core/accept?`:
 
 ```clojure
@@ -63,7 +74,7 @@ To implement the transitions `:filled?` and `:not-filled?` we `defmethod`
   (= (:v next-db) 10))
 
 (defmethod re-state.core/accept? :not-filled? [_ {:keys [next-db]}]
-  (not (filled? next-db)))
+  (< (:v next-db) 10))
 ```
 
 Of course the value `10` could be something stored in our db as well, possibly
@@ -72,30 +83,36 @@ set during the `:init` event.
 In this case `next-db` with `:v` equal to `2` would mean we are still in an
 `:in-between` state.
 
-### `:tem`
+### `:effects`
 
-Using a different example than those above, here is what a `:tem` for
-calculating the factorial of a number might look like:
+Using a different example than those above, here is what a flow for
+launching a rocket with a countdown might look like:
 
 ```clojure
-{:test   {:mult #{:dispatch-mult}
-          :init #{:dispatch-mult}}}
+{nil       {:intents {:init #{:ready}}}
+ :ready    {:intents {:start #{:counting}}
+            :preds #{:counter-max? :not-aborted? :not-started?}}
+ :counting {:intents {:decr-counter #{:launched :counting}
+                      :abort #{:aborted}}
+            :preds #{:started?}
+            :effects #{:countdown}}
+ :aborted  {:preds #{:aborted?}}
+ :launched {:preds #{:counter-zero?}}}
 ```
-The transition effects map is a map of next state to a map of intent to
-transition effects.
+The transition effects are a set of transition effect keywords.
 
 The transition effects handler should return a map of effects, like those in
 re-frame. To implement transition effects we `defmethod`
 `re-state.core/effects`.
 
 ```clojure
-(defmethod re-state.core/effects :dispatch-mult [_ _]
-  {:dispatch [:mult]})
+(defmethod re-state.core/effects :countdown [_ _]
+  {:dispatch [:decr-counter]})
 ```
 
-After the `:tpm` is used to determine what the next valid state to accept is,
-the `:tem` is checked using the accepted path and if a handler is found it is
-called and its effects are merged.
+After the `:preds` are used to determine what the next valid state to accept is,
+the `:effects` are checked using the accepted state and if a handler is found it
+is called and its effects are merged.
 
 Like the transition predicate, the transition effects handler takes a context.
 It has the same keys as the transition predicate context, but also includes a
@@ -150,17 +167,8 @@ arguments and merges them into a single flow.
 
 ### Many effects
 
-All three maps have a uniform path: `keyword -> keyword -> set`. Because of this
-we can have muliple next state, multiple transition predicates, and lastly
-multiple next effects.
-
-The first two map naturally: multiple next states are an important concept
-central to the library, and multiple transition predicates require every one to
-be true for that transition to be accepted.
-
-For effects as well it is intuitive to be able to return multiple effects, but
-how do we resolve conflicts if lets say two effects return a `:dispatch` in
-their map?
+It is intuitive to be able to return multiple effects, but how do we resolve
+conflicts if lets say two effects return a `:dispatch` in their map?
 
 For this we have the multimethod `re-state.core/resolve-effects-conflict`. This
 takes the effects key and two values for that effect we must resolve by
@@ -212,7 +220,7 @@ In a normal re-frame application events have quite a bit of power. With no
 interceptors to interpret them they have the ability to directly modify what
 will become the next db.
 
-With the interceptor provided in `re-state.re-frame` we instead consider the
+With the interceptor provided in `re-state.core` we instead consider the
 updated db from an event handler to be only a proposal. This proposed db can be
 compared to the previous db in the transition predicates to determine the next
 control state.
@@ -244,5 +252,3 @@ state you're in.
 Writing your transition predicates using something like `core.logic` would be a
 good fit. Most apps probably wouldn't need that though, where simple boolean
 checks could be applied.
-
-To understand more about the potential of transition predicates, explore TLA+.

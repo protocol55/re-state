@@ -53,9 +53,6 @@
 
 (defn with-context [f x context]
   (cond
-    (fn? x)
-    (x context)
-
     (vector? x)
     (f (first x) (assoc context :params (rest x)))
 
@@ -146,28 +143,50 @@
              (reset! app-flow value)))
 
 (comment
+  (require '[clojure.set :refer [rename-keys]])
+  (require '[re-state.flow :as fl])
+
+  (def rocket
+    {nil      {:intents {:init #{:ready}}}
+    :ready    {:intents {:start #{:counting}}
+                :preds #{:counter-max? :not-aborted? :not-started?}}
+    :counting {:intents {:decr #{:launched :counting}
+                          :abort #{:aborted}}
+                :preds #{:started?}
+                :effects #{:count-down}}
+    :aborted  {:preds #{:aborted?}}
+    :launched {:preds #{:counter-zero?}}})
+
   (def context
-    {:effects {:db {}}
+    {:effects {:db {:counter 0 :started? true}}
      :coeffects {:db {}
-                 :event [:route :entry]
-                 ::state :ready
-                 ::flow {:fsm {:ready {:route #{:entry}}}
-                            :tpm {:entry {:route #{:always-true}}}
-                            :tem {:entry {:route #{:load-entries :route-home [:route :out]}}}}}})
+                 :event [:decr]
+                 ::state :counting
+                 ::flow rocket}})
 
+  (defmethod accept? :counter-max? [_ {:keys [next-db]}]
+    (= (:counter next-db) 10))
 
-  (defmethod effects :route-home [_ _]
-    {:dispatch [:route :home]})
+  (defmethod accept? :not-aborted? [_ {:keys [next-db]}]
+    (false? (:aborted? next-db)))
 
-  (defmethod accept? :always-true [_ _] true)
+  (defmethod accept? :aborted? [_ {:keys [next-db]}]
+    (true? (:aborted? next-db)))
 
-  (defmethod effects :load-entries [_ _]
-    {:dispatch [:load-entries]})
+  (defmethod accept? :not-started? [_ {:keys [next-db]}]
+    (false? (:started? next-db)))
 
-  (defmethod effects :route [_ {:keys [params]}]
-    {:dispatch-n [[:route (first params)]]})
+  (defmethod accept? :started? [_ {:keys [next-db]}]
+    (true? (:started? next-db)))
+
+  (defmethod accept? :counter-zero? [_ {:keys [next-db]}]
+    (zero? (:counter next-db)))
+
+  (defmethod effects :count-down [_ _]
+    {:dispatch [:decr]})
 
   (-> context
       (transition)
       (next-effects)
-      (assoc-db-state)))
+      (assoc-db-state))
+  )
