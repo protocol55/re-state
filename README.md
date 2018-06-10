@@ -6,44 +6,58 @@ Pattern](http://sam.js.org/) and
 
 ## Overview
 
-The three maps that define your application are as follows:
+The main concept of the library is the "flow". This is a map of control state
+keys to control state maps, where a control state map has the following keys:
 
-- `fsm`: The finite state machine map.
-- `tpm`: The transition predicate map.
-- `tem`: The transition effects map.
+- `:intents`: A map of intent to proposed next states
+- `:preds`: A map of predicate keywords
+- `:effects`: A map of effects predicate keywords
 
-### `fsm`
+Below you'll find a description of each.
 
-```clojure
-{nil          {:init       #{:empty}}
- :empty       {:add-water  #{:in-between}}
- :in-between  {:add-water  #{:in-between :full}
-               :drink      #{:in-between :empty}}
-  :full       {:drink      #{:in-between}}}
-```
-
-The finite state machine is a map of current state to a map of intent to
-possible next states.
-
-### `tpm`
+### `:intents`
 
 ```clojure
-{:in-between  {:add-water  state/not-filled?
-               :drink      state/not-empty?}
- :full        {:add-water  state/filled?}
- :empty       {:drink      state/empty?
-               :init       (constantly true)}}
+{nil         {:intents  {:init #{:empty}}}
+
+ :empty      {:intents  {:add-water #{:in-between}}
+              :preds    #{:empty?}}
+
+ :in-between {:intents  {:add-water #{:in-between :full}
+                         :drink #{:in-between :empty}}
+              :preds    #{:not-filled? :not-empty?}}
+
+ :full       {:intents  {:drink #{:in-between}}
+              :preds    #{:filled?}}}
 ```
 
-The transition predicate map is a map of next state to a map of intent to
-transition predicate.
+The intents map an event intent to possible next states.
 
-For example if in the above `fsm` we were to be in the
-`:in-between` state with the intent of `:add-water` we'd have the two possible
-next states of `:in-between` and `:full`. To determine which is the next valid
-state we pass a context to the predicate functions at the paths `[:in-between
-:add-water]` and `[:full :add-water]` in the `tpm`. This context looks like the
-following:
+### `:preds`
+
+```clojure
+{nil         {:intents  {:init #{:empty}}}
+
+ :empty      {:intents  {:add-water #{:in-between}}
+              :preds    #{:empty?}}
+
+ :in-between {:intents  {:add-water #{:in-between :full}
+                         :drink #{:in-between :empty}}
+              :preds    #{:not-filled? :not-empty?}}
+
+ :full       {:intents  {:drink #{:in-between}}
+              :preds    #{:filled?}}}
+```
+
+`:preds` are a set of transition predicate keywords. These keywords are
+registered using the multimethod `accept?`. Each must be true for the proposed
+state to be accepted.
+
+For example if in the above flow we were to be in the `:in-between` state with
+the intent of `:add-water` we'd have the two possible next states of
+`:in-between` and `:full`. To determine which is the next valid state we pass a
+context to the predicate functions registered for the predicates keywords of
+`:in-between` and `:full`. This context looks like the following:
 
 ```clojure
 {:prev-db    {:v 1}        ;; the previous db
@@ -52,13 +66,15 @@ following:
  :prev-state :in-between}  ;; the previous state
 ```
 
-Example implementations for `filled?` and `not-filled?` could be.
+To implement the predicates `:filled?` and `:not-filled?` we `defmethod`
+`re-state.core/accept?`:
 
-```
-(defn filled? [{:keys [next-db]}]
+```clojure
+(defmethod re-state.core/accept? :filled? [_ {:keys [next-db]}]
   (= (:v next-db) 10))
 
-(def not-filled? (complement filled?))
+(defmethod re-state.core/accept? :not-filled? [_ {:keys [next-db]}]
+  (< (:v next-db) 10))
 ```
 
 Of course the value `10` could be something stored in our db as well, possibly
@@ -67,24 +83,36 @@ set during the `:init` event.
 In this case `next-db` with `:v` equal to `2` would mean we are still in an
 `:in-between` state.
 
-### `tem`
+### `:effects`
 
-Using a different example than those above, here is what a `tem` for calculating
-the factorial of a number might look like:
+Using a different example than those above, here is what a flow for
+launching a rocket with a countdown might look like:
 
+```clojure
+{nil       {:intents {:init #{:ready}}}
+ :ready    {:intents {:start #{:counting}}
+            :preds #{:counter-max? :not-aborted? :not-started?}}
+ :counting {:intents {:decr-counter #{:launched :counting}
+                      :abort #{:aborted}}
+            :preds #{:started?}
+            :effects #{:countdown}}
+ :aborted  {:preds #{:aborted?}}
+ :launched {:preds #{:counter-zero?}}}
 ```
-{:test   {:mult dispatch-mult
-          :init dispatch-mult}}
-```
-The transition effects map is a map of next state to a map of intent to
-transition effects handler.
+The transition effects are a set of transition effect keywords.
 
 The transition effects handler should return a map of effects, like those in
-re-frame.
+re-frame. To implement transition effects we `defmethod`
+`re-state.core/effects`.
 
-After the `tpm` is used to determine what the next valid state to accept is, the
-`tem` is checked using the accepted path and if a handler is found it is called
-and its effects are merged.
+```clojure
+(defmethod re-state.core/effects :countdown [_ _]
+  {:dispatch [:decr-counter]})
+```
+
+After the `:preds` are used to determine what the next valid state to accept is,
+the `:effects` are checked using the accepted state and if a handler is found it
+is called and its effects are merged.
 
 Like the transition predicate, the transition effects handler takes a context.
 It has the same keys as the transition predicate context, but also includes a
@@ -92,14 +120,7 @@ It has the same keys as the transition predicate context, but also includes a
 
 ## re-frame interceptor
 
-While this library will eventually support different implementations, the
-currently available one is for re-frame. The `re-state.re-frame` namespace
-exposes the following api:
-
-- `reg-fsm`: a function that takes a handler returning a `fsm`
-- `reg-tpm`: a function that takes a handler returning a `tpm`
-- `reg-tem`: a function that takes a handler returning a `tem`
-- `interceptor`: an interceptor that will use the `fsm`, `tpm` and `tem`,
+- `interceptor`: an interceptor that will use the `:re-state.core/flow`,
   associng in a `:re-state.core/state` key into your db with the next state as
   well as adding to the re-frame context any transition effects.
 
@@ -120,6 +141,50 @@ For example:
 Note that it is still possible to return effects other than `db` using
 `reg-event-fx` but since they could be overridden by those returned from a
 transition effects handler it is suggested you avoid that.
+
+### Setup
+
+You'll have to initally bootstrap your application with an event that will set
+the `:re-state.core/flow` for your app. For example:
+
+```clojure
+(rf/reg-event-fx
+ :bootstrap
+ (fn [cofx event]
+   {:re-state.core/flow app-flow}))
+```
+
+Once you do this your events can start using the interceptor.
+
+### Dynamically adding flows
+
+As you noticed above we can create an effect which will set the flow. This means
+we can modify the flow of the app later, merging more flows into it, growing the
+capabilities of the app. This is useful if you were to store flows in a database
+and send them via ajax to your app. The `re-state.flow` namespace provides a
+useful function to facilitate this: `merge-flows`. It takes one or more flows as
+arguments and merges them into a single flow.
+
+### Many effects
+
+It is intuitive to be able to return multiple effects, but how do we resolve
+conflicts if lets say two effects return a `:dispatch` in their map?
+
+For this we have the multimethod `re-state.core/resolve-effects-conflict`. This
+takes the effects key and two values for that effect we must resolve by
+returning a vector of `[new-effect new-value]`. Included by default are handlers
+for `:dispatch` and `:dispatch-n`. These look the like the following:
+
+```
+(defmethod resolve-effects-conflict :dispatch [_ x y]
+  [:dispatch-n [x y]])
+
+(defmethod resolve-effects-conflict :dispatch-n [_ x y]
+  [:dispatch-n (into x y)])
+```
+
+Any app specific effects your app generates that could conflict can be handled
+this way.
 
 ## Deeper concepts
 
@@ -155,7 +220,7 @@ In a normal re-frame application events have quite a bit of power. With no
 interceptors to interpret them they have the ability to directly modify what
 will become the next db.
 
-With the interceptor provided in `re-state.re-frame` we instead consider the
+With the interceptor provided in `re-state.core` we instead consider the
 updated db from an event handler to be only a proposal. This proposed db can be
 compared to the previous db in the transition predicates to determine the next
 control state.
@@ -187,5 +252,3 @@ state you're in.
 Writing your transition predicates using something like `core.logic` would be a
 good fit. Most apps probably wouldn't need that though, where simple boolean
 checks could be applied.
-
-To understand more about the potential of transition predicates, explore TLA+.
